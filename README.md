@@ -265,16 +265,16 @@ MIT. Use for research, commercial, anything. No warranty.
 If you use this:
 
 ```
-@misc{gpt2_tool_call_2026,
+@misc{popovich_gpt2_tool_call_2026,
   title  = {GPT-2 124M Tool Calling via Steering Adapter and Full Fine-tune},
-  author = {<TODO: full name>},
+  author = {Popovich, Pavel D.},
   year   = {2026},
-  note   = {GitHub handle: barometech},
+  note   = {Also known as ``Tekhnozhrets'' (Техножнец). GitHub: barometech},
   url    = {https://github.com/barometech/gpt2-tool-call}
 }
 ```
 
-> If you cite academically, ask the author for their full name (the GitHub handle `barometech` will be updated to a proper byline as soon as it's provided).
+**Author:** Попович Павел Дмитриевич («Техножнец») — Pavel D. Popovich (alias *Tekhnozhrets*).
 
 ---
 
