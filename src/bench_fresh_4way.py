@@ -7,17 +7,12 @@ Variants:
   3. ft         — full FT GPT-2 (124M trainable, no adapter)
   4. ft_adapter — full FT GPT-2 + h13_ep1 adapter on top (combo)
 
-Bench sources (450 simple + 80 multiple + 80 parallel + 80 irrelevance = 690):
-  simple: 6 files
-  multiple, parallel, irrelevance — separate
-
-Smoke mode: `--smoke` runs only 20 simple items per model (~10 min total)
+Smoke mode: runs only 20+5+5+5 items per model (~seconds on CPU)
 """
 import os, sys, json, re, time, argparse
 from pathlib import Path
 import torch
 sys.stdout.reconfigure(encoding='utf-8') if hasattr(sys.stdout, 'reconfigure') else None
-# import from same package directory regardless of CWD
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from integrated_gpt2_torch import GPT2, load_gpt2_torch_weights, encode, decode
@@ -27,6 +22,7 @@ from long_context_pi_chunk import interpolate_wpe
 DEVICE = torch.device('cpu')
 torch.set_num_threads(4)
 
+# ================= DATA FILES =================
 FRESH_SIMPLE = [
     str(Path(__file__).resolve().parent.parent / "bench" / "fresh_bench_opus.json"),
     str(Path(__file__).resolve().parent.parent / "bench" / "fresh_bench_bio.json"),
@@ -38,7 +34,6 @@ FRESH_SIMPLE = [
 FRESH_MULTIPLE = str(Path(__file__).resolve().parent.parent / "bench" / "fresh_bench_multiple.json")
 FRESH_PARALLEL = str(Path(__file__).resolve().parent.parent / "bench" / "fresh_bench_parallel.json")
 FRESH_IRREL = str(Path(__file__).resolve().parent.parent / "bench" / "fresh_bench_irrelevance.json")
-
 
 def load_all():
     simple = []
@@ -56,28 +51,16 @@ def load_all():
         with open(FRESH_IRREL, encoding='utf-8') as fh: irr = json.load(fh)
     return simple, mult, par, irr
 
-
+# ================= PROMPT BUILDERS =================
 def build_prompt_simple(item):
     fn_json = json.dumps(item["function"], indent=2)[:600]
-    return (
-        f"SYSTEM: You are a helpful assistant with access to the following functions. Use them if required -\n"
-        f"{fn_json}\n\n\n"
-        f"USER: {item['prompt'][:400]}\n\n\n"
-        f"ASSISTANT: <functioncall> "
-    )
-
+    return f"SYSTEM: You are a helpful assistant with access to the following functions. Use them if required -\n{fn_json}\n\n\nUSER: {item['prompt'][:400]}\n\n\nASSISTANT: <functioncall> "
 
 def build_prompt_multi(item):
     funcs = item["function"]
     if isinstance(funcs, dict): funcs = [funcs]
     fn_json = json.dumps(funcs, indent=2)[:1200]
-    return (
-        f"SYSTEM: You are a helpful assistant with access to the following functions. Use them if required -\n"
-        f"{fn_json}\n\n\n"
-        f"USER: {item['prompt'][:400]}\n\n\n"
-        f"ASSISTANT: <functioncall> "
-    )
-
+    return f"SYSTEM: You are a helpful assistant with access to the following functions. Use them if required -\n{fn_json}\n\n\nUSER: {item['prompt'][:400]}\n\n\nASSISTANT: <functioncall> "
 
 def parse_name(text):
     if not text: return None
@@ -88,8 +71,7 @@ def parse_name(text):
     if m: return m.group(1)
     return None
 
-
-# ============== GENERATORS ===============
+# ================= GENERATORS =================
 @torch.no_grad()
 def gen_plain(gpt: GPT2, prompt, max_new=40):
     ids = encode(prompt)
@@ -103,7 +85,6 @@ def gen_plain(gpt: GPT2, prompt, max_new=40):
         ids.append(nxt)
         if nxt == encode("}")[0] or nxt == encode("\n")[0] or nxt == encode(")")[0]: break
     return decode(ids[L:]).strip()
-
 
 @torch.no_grad()
 def gen_adapter(model: FullSteeringGPT2, prompt, max_new=40):
@@ -121,33 +102,24 @@ def gen_adapter(model: FullSteeringGPT2, prompt, max_new=40):
         if nxt == encode("}")[0] or nxt == encode("\n")[0] or nxt == encode(")")[0]: break
     return decode(ids[L:]).strip()
 
-
-# ============== SCORERS ===============
-def check_simple(pred, item):
-    return pred == item["gold_name"]
-
-
-def check_multi(pred, item):
-    return pred == item["gold_name"]
-
-
+# ================= SCORERS =================
+def check_simple(pred, item): return pred == item["gold_name"]
+def check_multi(pred, item): return pred == item["gold_name"]
 def check_irrel(pred, item):
     funcs = item["function"]
     if isinstance(funcs, dict): funcs = [funcs]
     fn_names = [f.get("name", "") for f in funcs]
     return (pred is None) or (pred not in fn_names)
-
-
 def check_parallel(pred, item):
-    # We only check FIRST gold name matches (since single greedy generation)
     gold_calls = item.get("gold_calls", [])
     if not gold_calls: return False
     first_gold = gold_calls[0].get("name", "")
     return pred == first_gold
 
-
-def eval_set(name, items, gen_fn, build_fn, check_fn):
-    correct = 0; total = 0
+# ================= BENCH =================
+def eval_set(name, items, gen_fn, build_fn, check_fn, smoke=False):
+    correct = 0
+    total = 0
     t0 = time.time()
     for i, item in enumerate(items):
         prompt = build_fn(item)
@@ -155,10 +127,10 @@ def eval_set(name, items, gen_fn, build_fn, check_fn):
         pred = parse_name(gen)
         if check_fn(pred, item): correct += 1
         total += 1
-        if (i+1) % 50 == 0:
+        # выводим каждую итерацию в smoke-mode, иначе каждые 50
+        if smoke or (i+1) % 50 == 0:
             print(f"    [{name}] {i+1}/{len(items)}  acc={correct/(i+1)*100:.1f}%  t={time.time()-t0:.0f}s", flush=True)
     return correct, total
-
 
 def run_all_benches(label, gen_fn, smoke=False):
     simple, mult, par, irr = load_all()
@@ -167,25 +139,28 @@ def run_all_benches(label, gen_fn, smoke=False):
     print(f"\n  [{label}]  simple={len(simple)}  multiple={len(mult)}  parallel={len(par)}  irrelevance={len(irr)}")
     r = {}
     if simple:
-        c, n = eval_set(f"{label}/simple", simple, gen_fn, build_prompt_simple, check_simple)
+        c, n = eval_set(f"{label}/simple", simple, gen_fn, build_prompt_simple, check_simple, smoke=smoke)
         r["simple"] = (c, n)
     if mult:
-        c, n = eval_set(f"{label}/multiple", mult, gen_fn, build_prompt_multi, check_multi)
+        c, n = eval_set(f"{label}/multiple", mult, gen_fn, build_prompt_multi, check_multi, smoke=smoke)
         r["multiple"] = (c, n)
     if par:
-        c, n = eval_set(f"{label}/parallel", par, gen_fn, build_prompt_multi, check_parallel)
+        c, n = eval_set(f"{label}/parallel", par, gen_fn, build_prompt_multi, check_parallel, smoke=smoke)
         r["parallel"] = (c, n)
     if irr:
-        c, n = eval_set(f"{label}/irrelevance", irr, gen_fn, build_prompt_multi, check_irrel)
+        c, n = eval_set(f"{label}/irrelevance", irr, gen_fn, build_prompt_multi, check_irrel, smoke=smoke)
         r["irrelevance"] = (c, n)
     return r
 
-
+# ================= MAIN =================
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--smoke", action="store_true", help="Fast smoke test (20+5+5+5 items/model)")
     args = ap.parse_args()
-    mode = "SMOKE" if args.smoke else "FULL"
+
+    # включаем smoke-mode по умолчанию для CPU
+    smoke_flag = args.smoke
+    mode = "SMOKE" if smoke_flag else "FULL"
     print(f"[FRESH BENCH — 4 models, {mode} mode]")
 
     all_results = {}
@@ -195,10 +170,10 @@ def main():
     gpt_plain = GPT2()
     load_gpt2_torch_weights(gpt_plain)
     gpt_plain.to(DEVICE); gpt_plain.eval()
-    all_results["plain"] = run_all_benches("plain", smoke=args.smoke, gen_fn=lambda p: gen_plain(gpt_plain, p))
+    all_results["plain"] = run_all_benches("plain", gen_fn=lambda p: gen_plain(gpt_plain, p), smoke=smoke_flag)
     del gpt_plain
 
-    # 2. adapter only (frozen GPT-2 + h13)
+    # 2. adapter only
     print("\n=== Loading adapter (frozen GPT-2 + h13_ep1) ===")
     m = FullSteeringGPT2(adapter_layer=6, alpha=1.0)
     load_gpt2_torch_weights(m.gpt)
@@ -206,7 +181,7 @@ def main():
     m.adapter.load_state_dict(torch.load(str(Path(__file__).resolve().parent.parent / "weights" / "adapter_h13_bfcl_ep1.pt"), map_location='cpu'))
     interpolate_wpe(m.gpt, 2048)
     m.freeze_gpt(); m.to(DEVICE); m.eval()
-    all_results["adapter"] = run_all_benches("adapter", smoke=args.smoke, gen_fn=lambda p: gen_adapter(m, p))
+    all_results["adapter"] = run_all_benches("adapter", gen_fn=lambda p: gen_adapter(m, p), smoke=smoke_flag)
     del m
 
     # 3. FT GPT-2 alone
@@ -214,17 +189,17 @@ def main():
     gpt_ft = GPT2()
     gpt_ft.load_state_dict(torch.load(str(Path(__file__).resolve().parent.parent / "weights" / "gpt2_ft_final.pt"), map_location='cpu'))
     gpt_ft.to(DEVICE); gpt_ft.eval()
-    all_results["ft"] = run_all_benches("ft", smoke=args.smoke, gen_fn=lambda p: gen_plain(gpt_ft, p))
+    all_results["ft"] = run_all_benches("ft", gen_fn=lambda p: gen_plain(gpt_ft, p), smoke=smoke_flag)
     del gpt_ft
 
-    # 4. FT GPT-2 + adapter (combo)
+    # 4. FT GPT-2 + adapter
     print("\n=== Loading FT GPT-2 + adapter ===")
     m2 = FullSteeringGPT2(adapter_layer=6, alpha=1.0)
     m2.gpt.load_state_dict(torch.load(str(Path(__file__).resolve().parent.parent / "weights" / "gpt2_ft_final.pt"), map_location='cpu'))
     load_classifier_from_npz(m2, str(Path(__file__).resolve().parent.parent / "weights" / "adapter_torch_EN_BFCL.npz"))
     m2.adapter.load_state_dict(torch.load(str(Path(__file__).resolve().parent.parent / "weights" / "adapter_h13_bfcl_ep1.pt"), map_location='cpu'))
     m2.freeze_gpt(); m2.to(DEVICE); m2.eval()
-    all_results["ft_adapter"] = run_all_benches("ft_adapter", smoke=args.smoke, gen_fn=lambda p: gen_adapter(m2, p))
+    all_results["ft_adapter"] = run_all_benches("ft_adapter", gen_fn=lambda p: gen_adapter(m2, p), smoke=smoke_flag)
     del m2
 
     # ===== SUMMARY =====
@@ -253,12 +228,17 @@ def main():
             row += f"{'':>14}"
     print(row)
 
-    Path(__file__).resolve().parent.parent / "results" / "fresh_bench_4way_results.json".write_text(json.dumps({
-        k: {sub: {"correct": v[0], "n": v[1]} for sub, v in r.items()}
-        for k, r in all_results.items()
-    }, indent=2), encoding='utf-8')
+    # ===== SAVE RESULTS =====
+    results_file = Path(__file__).resolve().parent.parent / "results" / "fresh_bench_4way_results.json"
+    results_file.parent.mkdir(exist_ok=True)
+    results_file.write_text(
+        json.dumps({
+            k: {sub: {"correct": v[0], "n": v[1]} for sub, v in r.items()}
+            for k, r in all_results.items()
+        }, indent=2),
+        encoding='utf-8'
+    )
     print(f"\nSaved -> fresh_bench_4way_results.json")
-
 
 if __name__ == "__main__":
     main()
